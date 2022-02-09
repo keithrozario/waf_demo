@@ -1,0 +1,41 @@
+
+service: serverless
+
+frameworkVersion: '2'
+
+plugins:
+  - serverless-domain-manager
+
+provider:
+  name: aws
+  runtime: python3.8
+  lambdaHashingVersion: 20201221
+  stage: dev
+  region: ap-southeast-1
+  endpointType: REGIONAL
+
+
+functions:
+  hello:
+    handler: handler.hello
+    events:
+      - http: GET hello
+
+custom:
+  customDomains:
+    - rest:
+        domainName: waf-demo.keithrozario.com
+        stage: dev
+        basePath: api
+        endpointType: 'regional'
+        createRoute53Record: true
+        createRoute53IPv6Record: true
+        autoDomain: true
+    - rest:
+        domainName: inception.waf-demo.keithrozario.com
+        stage: dev
+        basePath: api
+        endpointType: 'regional'
+        createRoute53Record: true
+        createRoute53IPv6Record: true
+        autoDomain: true

@@ -1,0 +1,211 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: My API Gateway and Lambda function
+
+Parameters:
+  apiGatewayName:
+    Type: String
+    Default: my-api
+  apiGatewayStageName:
+    Type: String
+    AllowedPattern: "[a-z0-9]+"
+    Default: wafdemodev
+  lambdaFunctionName:
+    Type: String
+    AllowedPattern: "[a-zA-Z0-9]+[a-zA-Z0-9-]+[a-zA-Z0-9]+"
+    Default: waf-function
+
+Resources:
+
+  ApiGatewayRestApi:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: !Ref apiGatewayName
+      EndpointConfiguration:
+        Types:
+          - EDGE
+      Policy: ''
+
+  ApiGatewayResourceHello:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      ParentId: !GetAtt 
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: hello
+      RestApiId: !Ref ApiGatewayRestApi
+
+  ApiGatewayMethodHelloGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      HttpMethod: GET
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourceHello
+      RestApiId: !Ref ApiGatewayRestApi
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Join 
+          - ''
+          - - 'arn:'
+            - !Ref 'AWS::Partition'
+            - ':apigateway:'
+            - !Ref 'AWS::Region'
+            - ':lambda:path/2015-03-31/functions/'
+            - !GetAtt 
+              - HelloLambdaFunction
+              - Arn
+            - /invocations
+      MethodResponses: []
+
+  ApiGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: !Ref apiGatewayStageName
+    DependsOn:
+      - ApiGatewayMethodHelloGet
+
+
+  HelloLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        ZipFile: |
+          def handler(event,context):
+            return {
+              'body': '<h1>Hello there</h1>',
+              'headers': {
+                'Content-Type': 'text/html'
+              },
+              'statusCode': 200
+            }
+      Description: ApiGateway Hello Lambda Function
+      FunctionName: !Ref lambdaFunctionName
+      Handler: index.handler
+      MemorySize: 128
+      Role: !GetAtt HelloLambdaIAMRole.Arn
+      Runtime: python3.8
+
+  HelloLambdaPermissionApiGateway:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt 
+        - HelloLambdaFunction
+        - Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Join 
+        - ''
+        - - 'arn:'
+          - !Ref 'AWS::Partition'
+          - ':execute-api:'
+          - !Ref 'AWS::Region'
+          - ':'
+          - !Ref 'AWS::AccountId'
+          - ':'
+          - !Ref ApiGatewayRestApi
+          - /*/*
+
+  HelloLambdaIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+      Policies:
+        - PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Effect: Allow
+                Resource:
+                  - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${lambdaFunctionName}:*
+          PolicyName: HelloLambdaPolicy
+
+  lambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${lambdaFunctionName}
+      RetentionInDays: 3
+
+
+  WebAcl:
+    Type: 'AWS::WAFv2::WebACL'
+    Properties:
+      Name: WAFDemo
+      Scope: REGIONAL
+      Description: This is an WebACL for WAFDemo
+      DefaultAction:
+          Allow: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: SampleWebAclDemo
+      Rules:
+        - Name: AWSCommonRules
+          Priority: 0
+          OverrideAction:
+            Count: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RuleWithAWSManagedRulesMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+              ExcludedRules: []
+        - Name: AWSSqliRules
+          Priority: 1
+          OverrideAction:
+            Count: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RuleWithAWSManagedRulesMetric
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+              ExcludedRules: []
+
+  WebACLAssociation:
+    Type: 'AWS::WAFv2::WebACLAssociation'
+    DependsOn: 
+      - WebAcl
+      - ApiGatewayDeployment  # need to deploy a stage before associating
+    Properties:
+      WebACLArn: !GetAtt WebAcl.Arn
+      ResourceArn: !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/${ApiGatewayRestApi}/stages/${apiGatewayStageName}'
+
+  WebAclLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: aws-waf-logs-demo  # https://docs.aws.amazon.com/waf/latest/developerguide/logging-cw-logs.html
+      RetentionInDays: 30
+
+  WebAclLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    DependsOn: 
+      - WebAclLogGroup
+      - WebAcl
+    Properties: 
+      LogDestinationConfigs:
+        - !Select [0, !Split [':*', !GetAtt WebAclLogGroup.Arn ]]  #https://github.com/aws-cloudformation/cloudformation-coverage-roadmap/issues/206
+      ResourceArn: !GetAtt WebAcl.Arn
+
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/${apiGatewayStageName}
